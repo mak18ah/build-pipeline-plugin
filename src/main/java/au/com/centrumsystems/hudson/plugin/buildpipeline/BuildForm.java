@@ -2,8 +2,11 @@ package au.com.centrumsystems.hudson.plugin.buildpipeline;
 
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
+import hudson.model.Hudson;
+import hudson.model.DependencyGraph;
 import hudson.model.ItemGroup;
 import hudson.model.ParametersDefinitionProperty;
+import join.JoinDependency;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -14,6 +17,8 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 import org.kohsuke.stapler.bind.JavaScriptMethod;
+
+import au.com.centrumsystems.hudson.plugin.util.HudsonResult;
 
 /**
  * @author Centrum Systems
@@ -87,10 +92,14 @@ public class BuildForm {
         this.pipelineBuild = pipelineBuild;
         status = pipelineBuild.getCurrentBuildResult();
         dependencies = new ArrayList<BuildForm>();
-        for (final PipelineBuild downstream : pipelineBuild.getDownstreamPipeline()) {
-            final Collection<AbstractProject<?, ?>> forkedPath = new LinkedHashSet<AbstractProject<?, ?>>(parentPath);
-            if (forkedPath.add(downstream.getProject())) {
-                dependencies.add(new BuildForm(context, downstream, forkedPath));
+        final boolean shouldHideDownstreamDependencies = hideDownstreamDependenciesForJoinParent(pipelineBuild.getDownstreamPipeline());
+        
+        if (!shouldHideDownstreamDependencies) {
+            for (final PipelineBuild downstream : pipelineBuild.getDownstreamPipeline()) {
+                final Collection<AbstractProject<?, ?>> forkedPath = new LinkedHashSet<AbstractProject<?, ?>>(parentPath);
+                if (forkedPath.add(downstream.getProject())) {
+                    dependencies.add(new BuildForm(context, downstream, forkedPath));
+                }
             }
         }
         id = hashCode();
@@ -105,7 +114,48 @@ public class BuildForm {
         }
         parameters = paramList;
     }
+    /**
+     * For projects making use of join plugin, we want to remove clutter from the view by only showing
+     * downstream projects for a single "path" along the join.
+     *
+     * @param downstreamPipeline the downstream builds for this build
+     * @return true if this build is a join parent with only PENDING child dependencies
+     */
+    private boolean hideDownstreamDependenciesForJoinParent(List<PipelineBuild> downstreamPipeline) {
 
+        // First check if join plugin is enabled for this Jenkins instance
+        // and if there is even a downstream pipeline to consider
+        if (Hudson.getInstance().getPlugin("join") == null || downstreamPipeline == null || downstreamPipeline.size() == 0) {
+            return false;
+        }
+
+        final DependencyGraph dependencyGraph = Hudson.getInstance().getDependencyGraph();
+        final AbstractProject<?, ?> project = pipelineBuild.getProject();
+        final List<DependencyGraph.Dependency> downstreamDependencies = dependencyGraph.getDownstreamDependencies(project);
+        if (downstreamDependencies == null) {
+            return false;
+        }
+
+        for (DependencyGraph.Dependency downstreamDependency : downstreamDependencies) {
+            if (downstreamDependency instanceof JoinDependency || JoinDependency.class.isAssignableFrom(downstreamDependency.getClass())) {
+
+                // This build is part of a join, so we should check if it has any downstream builds that are PENDING
+                for (final PipelineBuild downstream : downstreamPipeline) {
+                    if (!HudsonResult.PENDING.name().equals(downstream.getCurrentBuildResult())) {
+                        // This project is the "final" join step, and its dependencies should be displayed
+                        return false;
+                    }
+                }
+
+                // This build is a join parent with only PENDING downstream builds, so we should hide them
+                return true;
+
+            }
+        }
+
+        // this build is not part of a join
+        return false;
+    }
     public String getStatus() {
         return status;
     }
